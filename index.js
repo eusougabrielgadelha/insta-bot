@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = nodePath.dirname(__filename);
 dotenv.config({ path: nodePath.join(__dirname, '.env') });
+console.log('[BOOT]', { file: __filename, cwd: process.cwd(), node: process.versions.node });
 
 // ---- Deps ----
 import fs from 'fs';
