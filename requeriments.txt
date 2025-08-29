@@ -1,0 +1,12 @@
+# Sistema
+Node.js >= 20
+
+# NPM deps (instaladas via package.json / npm install)
+@playwright/test@1.46.0
+axios@1.7.2
+discord.js@14.15.3
+dotenv@16.4.5
+form-data@4.0.0
+
+# Passos extras
+npx playwright install --with-deps chromium

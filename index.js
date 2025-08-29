@@ -77,12 +77,18 @@ async function postToMake({ caption, reelUrl, videoUrl, source = 'discord-bot' }
 }
 
 // ------------ Discord Bot ------------
+import { Client, GatewayIntentBits } from 'discord.js';
+
 const bot = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-// aceita -legenda, --legenda ou —legenda (traço longo)
-const CMD = /^!postar\s+[-–—]{1,2}legenda\s+(.+?)\s+(https?:\/\/\S+)/i;
+// (opcional, silencia o aviso deprecatado)
+bot.once('clientReady', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
 
 bot.on('ready', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
 
