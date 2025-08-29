@@ -1,4 +1,3 @@
-// ---- Carrega .env da mesma pasta, independente do CWD do PM2 ----
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -40,7 +39,7 @@ async function extractMp4FromInsta(url) {
 
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForTimeout(3500); // dá tempo do player requisitar o vídeo
+    await page.waitForTimeout(3500);
   } finally {
     await browser.close();
   }
@@ -64,7 +63,7 @@ async function uploadToFileIO(localPath) {
   if (!res.data || !res.data.link) {
     throw new Error('Upload em file.io falhou: ' + JSON.stringify(res.data || {}));
   }
-  return res.data.link; // ex.: https://file.io/abcd1234 (link temporário)
+  return res.data.link; // ex.: https://file.io/abcd1234
 }
 
 async function postToMake({ caption, reelUrl, videoUrl, source = 'discord-bot' }) {
