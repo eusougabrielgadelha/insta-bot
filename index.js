@@ -37,7 +37,7 @@ async function extractMp4FromInsta(url) {
 
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForTimeout(3500); // dá tempo do player requisitar o vídeo
+    await page.waitForTimeout(3500); // tempo para o player requisitar o vídeo
   } finally {
     await browser.close();
   }
@@ -51,7 +51,6 @@ async function downloadTo(url, outPath) {
   return outPath;
 }
 
-// host temporário SEM domínio/IP próprios: file.io
 async function uploadToFileIO(localPath) {
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
@@ -73,12 +72,10 @@ async function postToMake({ caption, reelUrl, videoUrl, source = 'discord-bot' }
     source,
     ts: new Date().toISOString()
   };
-  await axios.post(MAKE_WEBHOOK_URL, payload, { timeout: 60000 });
+  await axios.post(process.env.MAKE_WEBHOOK_URL, payload, { timeout: 60000 });
 }
 
 // ------------ Discord Bot ------------
-import { Client, GatewayIntentBits } from 'discord.js';
-
 const bot = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -87,10 +84,9 @@ const bot = new Client({
   ]
 });
 
-// (opcional, silencia o aviso deprecatado)
-bot.once('clientReady', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
+const CMD = /^!postar\s+[-–—]{1,2}legenda\s+(.+?)\s+(https?:\/\/\S+)/i;
 
-bot.on('ready', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
+bot.once('clientReady', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
 
 bot.on('messageCreate', async (msg) => {
   if (msg.author.bot) return;
