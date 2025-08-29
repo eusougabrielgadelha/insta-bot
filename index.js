@@ -33,26 +33,28 @@ const httpsAgentV4 = new https.Agent({
 
 // ---- Helpers ----
 
-// Monta os argumentos do yt-dlp (com ou sem cookies)
+// Monta os argumentos do yt-dlp (com ou sem cookies) – força merge para mp4
 function buildYtDlpArgs(reelUrl, template, useCookies) {
-  const args = ['-S', 'ext:mp4:m4v', '--no-playlist', '-o', template, reelUrl];
+  const args = [
+    '-S', 'ext:mp4:m4v',
+    '--no-playlist',
+    '--merge-output-format', 'mp4',     // força saída final mp4
+    '-o', template,
+    reelUrl
+  ];
 
   if (useCookies) {
     if (IG_COOKIES_FILE) {
-      // arquivo Netscape (exportado do navegador)
       args.unshift('--cookies', IG_COOKIES_FILE);
     } else if (IG_COOKIE) {
-      // linha completa de Cookie
       args.unshift('--add-header', `Cookie: ${IG_COOKIE}`);
     } else if (IG_SESSIONID) {
-      // só sessionid
       args.unshift('--add-header', `Cookie: sessionid=${IG_SESSIONID}`);
     }
   }
   return args;
 }
 
-// Baixa o vídeo (tenta 1x sem cookie, e se falhar tenta com cookie se existir)
 async function downloadReelWithYtDlp(reelUrl, tmpDir, id) {
   await fsp.mkdir(tmpDir, { recursive: true });
   const template = nodePath.join(tmpDir, `${id}.%(ext)s`);
@@ -70,13 +72,49 @@ async function downloadReelWithYtDlp(reelUrl, tmpDir, id) {
     }
   }
 
-  // Detecta o arquivo baixado
-  const exts = ['mp4', 'm4v', 'mov', 'mkv', 'webm'];
-  for (const ext of exts) {
-    const p = nodePath.join(tmpDir, `${id}.${ext}`);
-    try { await fsp.access(p); return p; } catch {}
+  // Preferência: arquivo final “limpo”
+  const clean = nodePath.join(tmpDir, `${id}.mp4`);
+  try { await fsp.access(clean); return clean; } catch {}
+
+  // Se não há “limpo”, procurar o MAIOR .mp4 gerado (pode ser fdash-*.mp4)
+  const entries = await fsp.readdir(tmpDir);
+  const mp4s = [];
+  for (const name of entries) {
+    if (name.startsWith(id) && name.endsWith('.mp4')) {
+      const full = nodePath.join(tmpDir, name);
+      const st = await fsp.stat(full).catch(() => null);
+      if (st?.isFile()) mp4s.push({ full, size: st.size, name });
+    }
   }
-  throw new Error('yt-dlp não gerou arquivo de saída esperado.');
+  if (mp4s.length === 0) throw new Error('yt-dlp não gerou .mp4 (talvez bloqueio ou erro upstream).');
+
+  // Pega o maior .mp4 (normalmente é o vídeo principal)
+  mp4s.sort((a, b) => b.size - a.size);
+  const bestVideoOnly = mp4s[0].full;
+
+  // Tentar mesclar com o .m4a se houver FFmpeg + áudio
+  try {
+    const m4a = entries.find(n => n.startsWith(id) && n.endsWith('.m4a'));
+    if (m4a) {
+      const audioPath = nodePath.join(tmpDir, m4a);
+      const out = nodePath.join(tmpDir, `${id}.mp4`);
+      // usa ffmpeg (precisa estar instalado)
+      await execFileP('ffmpeg', [
+        '-y',
+        '-i', bestVideoOnly,
+        '-i', audioPath,
+        '-c', 'copy',
+        out
+      ], { maxBuffer: 1024 * 1024 * 1024 });
+      // se tudo ok, retornar o merged
+      return out;
+    }
+  } catch (e) {
+    console.warn('[ffmpeg merge falhou]', e?.message || e);
+  }
+
+  // Sem merge, segue com o melhor .mp4 (pode ficar sem áudio)
+  return bestVideoOnly;
 }
 
 async function runYtDlp(args) {
