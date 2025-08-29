@@ -1,4 +1,4 @@
-
+// ---- Carrega .env da mesma pasta, independente do CWD do PM2 ----
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -6,26 +6,22 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, '.env') });
 
+// ---- Deps ----
 import fs from 'fs';
 import fsp from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import axios from 'axios';
 import FormData from 'form-data';
 import { Client, GatewayIntentBits } from 'discord.js';
 import { chromium } from '@playwright/test';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// ------------ ENV ------------
+// ---- ENV ----
 const { DISCORD_TOKEN, MAKE_WEBHOOK_URL } = process.env;
 if (!DISCORD_TOKEN || !MAKE_WEBHOOK_URL) {
   console.error('Preencha DISCORD_TOKEN e MAKE_WEBHOOK_URL no .env');
   process.exit(1);
 }
 
-// ------------ Helpers ------------
+// ---- Helpers ----
 async function extractMp4FromInsta(url) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({
@@ -44,7 +40,7 @@ async function extractMp4FromInsta(url) {
 
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForTimeout(3500); // tempo para o player requisitar o vídeo
+    await page.waitForTimeout(3500); // dá tempo do player requisitar o vídeo
   } finally {
     await browser.close();
   }
@@ -79,10 +75,10 @@ async function postToMake({ caption, reelUrl, videoUrl, source = 'discord-bot' }
     source,
     ts: new Date().toISOString()
   };
-  await axios.post(process.env.MAKE_WEBHOOK_URL, payload, { timeout: 60000 });
+  await axios.post(MAKE_WEBHOOK_URL, payload, { timeout: 60000 });
 }
 
-// ------------ Discord Bot ------------
+// ---- Discord Bot ----
 const bot = new Client({
   intents: [
     GatewayIntentBits.Guilds,
