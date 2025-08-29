@@ -26,7 +26,7 @@ if (!DISCORD_TOKEN || !MAKE_WEBHOOK_URL) {
 }
 console.log('[BOOT]', { file: __filename, cwd: process.cwd(), node: process.versions.node });
 
-// ---- Força IPv4 em HTTPS (evita ETIMEDOUT por IPv6) ----
+// ---- Força IPv4 em HTTPS (evita ETIMEDOUT por IPv6) – usaremos só no transfer.sh ----
 const httpsAgentV4 = new https.Agent({
   lookup: (hostname, options, cb) => dns.lookup(hostname, { family: 4, all: false }, cb)
 });
@@ -89,13 +89,13 @@ async function runYtDlp(args) {
   }
 }
 
-// Upload em transfer.sh (IPv4) -> URL pública
+// Upload em transfer.sh (IPv4) -> URL pública (MANTÉM httpsAgentV4 AQUI)
 async function uploadToTransferSh(localPath) {
   const fileName = nodePath.basename(localPath);
   const stream = fs.createReadStream(localPath);
   const url = `https://transfer.sh/${encodeURIComponent(fileName)}`;
   const res = await axios.put(url, stream, {
-    httpsAgent: httpsAgentV4,
+    httpsAgent: httpsAgentV4, // <- continua AQUI
     headers: { 'Content-Type': 'application/octet-stream' },
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
@@ -106,18 +106,34 @@ async function uploadToTransferSh(localPath) {
   return link;
 }
 
-// Fallback: upload em file.io -> URL pública
+// Fallback 1: upload em file.io -> URL pública (REMOVER httpsAgent AQUI!)
 async function uploadToFileIO(localPath) {
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
   const res = await axios.post('https://file.io', form, {
-    httpsAgent: httpsAgentV4,
+    // httpsAgent: httpsAgentV4,  // ❌ REMOVER
     headers: form.getHeaders(),
     timeout: 180000,
     maxBodyLength: Infinity
   });
   if (!res.data || !res.data.link) throw new Error('Upload no file.io falhou: ' + JSON.stringify(res.data || {}));
   return String(res.data.link).trim();
+}
+
+// Fallback 2: upload em 0x0.st -> URL pública (NOVO)
+async function uploadTo0x0(localPath) {
+  const form = new FormData();
+  form.append('file', fs.createReadStream(localPath));
+  const res = await axios.post('https://0x0.st', form, {
+    headers: form.getHeaders(),
+    timeout: 180000,
+    maxBodyLength: Infinity
+  });
+  const link = String(res.data || '').trim();
+  if (!/^https?:\/\/0x0\.st\/\w+/.test(link)) {
+    throw new Error('Upload no 0x0.st não retornou link válido: ' + link);
+  }
+  return link;
 }
 
 // Envia payload para o Make
@@ -149,17 +165,20 @@ bot.on('messageCreate', async (msg) => {
   let filePath;
 
   try {
-    await msg.channel.send('⬇️ Baixando vídeo (yt-dlp)…');
-    filePath = await downloadReelWithYtDlp(reelUrl, tmpDir, id);
-
     await msg.channel.send('☁️ Enviando arquivo para link público…');
     let publicUrl;
     try {
-      publicUrl = await uploadToTransferSh(filePath);
+      publicUrl = await uploadToTransferSh(filePath);               // 1º
     } catch (err1) {
       console.warn('[transfer.sh falhou]', err1?.message || err1);
       await msg.channel.send('⚠️ transfer.sh indisponível, tentando file.io…');
-      publicUrl = await uploadToFileIO(filePath);
+      try {
+        publicUrl = await uploadToFileIO(filePath);                 // 2º
+      } catch (err2) {
+        console.warn('[file.io falhou]', err2?.message || err2);
+        await msg.channel.send('⚠️ file.io indisponível, tentando 0x0.st…');
+        publicUrl = await uploadTo0x0(filePath);                    // 3º
+      }
     }
 
     await msg.channel.send('📨 Disparando para o Make…');
