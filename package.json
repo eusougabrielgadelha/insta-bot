@@ -1,0 +1,27 @@
+{
+  "name": "insta-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Discord bot: extrai MP4 de Reels, envia link temporário ao Make.com via webhook",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "NODE_ENV=development node index.js",
+    "setup:playwright": "npx playwright install --with-deps chromium",
+    "setup": "npm install && npm run setup:playwright",
+    "pm2:start": "pm2 start index.js --name insta-bot && pm2 save",
+    "pm2:restart": "pm2 restart insta-bot --update-env",
+    "pm2:logs": "pm2 logs insta-bot"
+  },
+  "dependencies": {
+    "@playwright/test": "1.46.0",
+    "axios": "1.7.2",
+    "discord.js": "14.15.3",
+    "dotenv": "16.4.5",
+    "form-data": "4.0.0"
+  }
+}
