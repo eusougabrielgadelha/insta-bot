@@ -1,9 +1,10 @@
+// ---- Carrega .env da mesma pasta (independe do CWD do PM2) ----
 import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import * as nodePath from 'node:path';
+import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.join(__dirname, '.env') });
+const __dirname = nodePath.dirname(__filename);
+dotenv.config({ path: nodePath.join(__dirname, '.env') });
 
 // ---- Deps ----
 import fs from 'fs';
@@ -99,9 +100,9 @@ bot.on('messageCreate', async (msg) => {
   const reelUrl = m[2].trim();
 
   const id = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-  const tmpDir = path.join(__dirname, 'tmp');
+  const tmpDir = nodePath.join(__dirname, 'tmp');
   await fsp.mkdir(tmpDir, { recursive: true });
-  const filePath = path.join(tmpDir, `${id}.mp4`);
+  const filePath = nodePath.join(tmpDir, `${id}.mp4`);
 
   try {
     await msg.channel.send('🔎 Buscando vídeo…');
