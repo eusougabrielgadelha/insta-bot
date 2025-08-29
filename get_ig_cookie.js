@@ -9,6 +9,7 @@ const OUT = process.env.OUT || '/root/insta-bot/cookies.txt';
 const HEADLESS = (process.env.HEADLESS ?? 'true').toLowerCase() !== 'false'; // default: true
 const EXTRA_WAIT_MS = Number(process.env.EXTRA_WAIT_MS || 4000);
 const TIMEOUT = Number(process.env.TIMEOUT || 120000);
+const NAV_RETRIES = Number(process.env.NAV_RETRIES || 3);
 
 if (!IG_USER || !IG_PASS) {
   console.error('Defina IG_USER e IG_PASS. Ex.: IG_USER=meuuser IG_PASS=mins3nh@ node get_ig_cookie.js');
@@ -35,7 +36,6 @@ function toNetscapeCookieLines(cookies) {
 
 async function acceptCookies(page) {
   const candidates = [
-    // PT/EN e variações comuns
     'button:has-text("Allow all cookies")',
     'button:has-text("Only allow essential cookies")',
     'button:has-text("Permitir todos os cookies")',
@@ -44,12 +44,12 @@ async function acceptCookies(page) {
     'button:has-text("Aceitar")',
     '[role="dialog"] button:has-text("Accept")',
     '[role="dialog"] button:has-text("Aceitar")',
-    'text=/cookies/i >> .. >> button', // fallback genérico
+    'text=/cookies/i >> .. >> button',
   ];
   for (const sel of candidates) {
     try {
       const b = await page.$(sel);
-      if (b) { await b.click({ timeout: 1500 }); await page.waitForTimeout(500); }
+      if (b) { await b.click({ timeout: 1500 }); await page.waitForTimeout(400); }
     } catch {}
   }
 }
@@ -61,13 +61,12 @@ async function waitForAnySelector(page, sels, timeoutMs) {
       const el = await page.$(s).catch(() => null);
       if (el) return s;
     }
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(350);
   }
   return null;
 }
 
 async function fillLogin(page, user, pass) {
-  // Tenta por name, placeholder e fallback por type
   const userSels = [
     'input[name="username"]',
     'input[placeholder*="username" i]',
@@ -90,7 +89,7 @@ async function fillLogin(page, user, pass) {
   await page.fill(userSel, user, { timeout: 20000 });
   await page.fill(passSel, pass, { timeout: 20000 });
 
-  // Candidatos de submit
+  // Submit
   const submitCandidates = [
     'button[type="submit"]',
     'form button:has-text("Log in")',
@@ -102,9 +101,24 @@ async function fillLogin(page, user, pass) {
     const btn = await page.$(sel).catch(() => null);
     if (btn) { await btn.click({ timeout: 20000 }).catch(()=>{}); clicked = true; break; }
   }
-  if (!clicked) {
-    await page.keyboard.press('Enter');
+  if (!clicked) await page.keyboard.press('Enter');
+}
+
+// navegação com retry para contornar ERR_HTTP_RESPONSE_CODE_FAILURE (4xx/5xx)
+async function gotoWithRetries(page, url, label) {
+  let lastErr;
+  for (let i = 0; i < NAV_RETRIES; i++) {
+    try {
+      const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+      // Se a navegação falhar sem response, Playwright lança; se vier response 4xx/5xx, trate aqui
+      if (resp && resp.status() >= 400) throw new Error(`HTTP ${resp.status()} em ${label || url}`);
+      return;
+    } catch (e) {
+      lastErr = e;
+      await page.waitForTimeout(1000 + i * 1000);
+    }
   }
+  throw lastErr || new Error(`Falha ao navegar para ${url}`);
 }
 
 (async () => {
@@ -122,22 +136,26 @@ async function fillLogin(page, user, pass) {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36',
     viewport: { width: 1280, height: 800 },
     locale: 'pt-BR',
+    ignoreHTTPSErrors: true,
+    extraHTTPHeaders: {
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
   });
   const page = await ctx.newPage();
 
   try {
-    // 1) Desktop
+    // 1) Desktop com retry
     console.log('[IG COOKIE] Abrindo login (desktop)…');
-    await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-    await page.waitForTimeout(1500);
+    await gotoWithRetries(page, 'https://www.instagram.com/accounts/login/', 'login-desktop');
+    await page.waitForTimeout(1200);
     await acceptCookies(page);
 
     // Se não encontrar rapidamente, tenta mobile
     let hasUsername = await waitForAnySelector(page, ['input[name="username"]', 'input[type="text"]'], 8000);
     if (!hasUsername) {
       console.log('[IG COOKIE] Trocando para versão mobile…');
-      await page.goto('https://m.instagram.com/accounts/login/', { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-      await page.waitForTimeout(1500);
+      await gotoWithRetries(page, 'https://m.instagram.com/accounts/login/', 'login-mobile');
+      await page.waitForTimeout(1200);
       await acceptCookies(page);
     }
 
@@ -157,7 +175,7 @@ async function fillLogin(page, user, pass) {
     let igCookies = cookies.filter(c => /instagram\.com$/i.test(c.domain || ''));
     if (!igCookies.find(c => c.name === 'sessionid')) {
       console.log('[IG COOKIE] sessionid não vista; visitando home…');
-      await page.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+      await gotoWithRetries(page, 'https://www.instagram.com/', 'home');
       await page.waitForTimeout(EXTRA_WAIT_MS);
       cookies = await ctx.cookies();
       igCookies = cookies.filter(c => /instagram\.com$/i.test(c.domain || ''));
