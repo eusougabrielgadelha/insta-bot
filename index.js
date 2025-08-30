@@ -55,6 +55,16 @@ function buildYtDlpArgs(reelUrl, template, useCookies) {
   return args;
 }
 
+async function runYtDlp(args) {
+  try {
+    const { stdout, stderr } = await execFileP('yt-dlp', args, { maxBuffer: 1024 * 1024 * 1024 });
+    if (stdout) console.log('[yt-dlp stdout]', stdout.slice(0, 1000));
+    if (stderr) console.log('[yt-dlp stderr]', stderr.slice(0, 1000));
+  } catch (e) {
+    throw new Error(`Falha no yt-dlp: ${e.message}`);
+  }
+}
+
 async function downloadReelWithYtDlp(reelUrl, tmpDir, id) {
   await fsp.mkdir(tmpDir, { recursive: true });
   const template = nodePath.join(tmpDir, `${id}.%(ext)s`);
@@ -117,16 +127,6 @@ async function downloadReelWithYtDlp(reelUrl, tmpDir, id) {
   return bestVideoOnly;
 }
 
-async function runYtDlp(args) {
-  try {
-    const { stdout, stderr } = await execFileP('yt-dlp', args, { maxBuffer: 1024 * 1024 * 1024 });
-    if (stdout) console.log('[yt-dlp stdout]', stdout.slice(0, 1000));
-    if (stderr) console.log('[yt-dlp stderr]', stderr.slice(0, 1000));
-  } catch (e) {
-    throw new Error(`Falha no yt-dlp: ${e.message}`);
-  }
-}
-
 // Upload em transfer.sh (IPv4) -> URL pública (MANTÉM httpsAgentV4 AQUI)
 async function uploadToTransferSh(localPath) {
   const fileName = nodePath.basename(localPath);
@@ -144,12 +144,11 @@ async function uploadToTransferSh(localPath) {
   return link;
 }
 
-// Fallback 1: upload em file.io -> URL pública (REMOVER httpsAgent AQUI!)
+// Fallback 1: upload em file.io -> URL pública (SEM httpsAgent aqui)
 async function uploadToFileIO(localPath) {
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
   const res = await axios.post('https://file.io', form, {
-    // httpsAgent: httpsAgentV4,  // ❌ REMOVER
     headers: form.getHeaders(),
     timeout: 180000,
     maxBodyLength: Infinity
@@ -158,7 +157,7 @@ async function uploadToFileIO(localPath) {
   return String(res.data.link).trim();
 }
 
-// Fallback 2: upload em 0x0.st -> URL pública (NOVO)
+// Fallback 2: upload em 0x0.st -> URL pública
 async function uploadTo0x0(localPath) {
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
@@ -203,6 +202,20 @@ bot.on('messageCreate', async (msg) => {
   let filePath;
 
   try {
+    await fsp.mkdir(tmpDir, { recursive: true });
+
+    // 1) DOWNLOAD
+    await msg.channel.send('⬇️ Baixando vídeo (yt-dlp)…');
+    filePath = await downloadReelWithYtDlp(reelUrl, tmpDir, id);
+
+    // sanity-check
+    if (!filePath) throw new Error('Download falhou: nenhum arquivo gerado pelo yt-dlp');
+    await fsp.access(filePath); // lança se não existir
+    console.log('[DL DONE]', { id, tmpDir, filePath });
+    // opcional: listar tmp pra debug
+    // console.log('[DL LIST]', await fsp.readdir(tmpDir));
+
+    // 2) UPLOAD (com 3 fallbacks)
     await msg.channel.send('☁️ Enviando arquivo para link público…');
     let publicUrl;
     try {
@@ -219,6 +232,7 @@ bot.on('messageCreate', async (msg) => {
       }
     }
 
+    // 3) MAKE WEBHOOK
     await msg.channel.send('📨 Disparando para o Make…');
     await postToMake({ caption, reelUrl, videoUrl: publicUrl });
 
@@ -227,7 +241,9 @@ bot.on('messageCreate', async (msg) => {
     console.error(e);
     await msg.channel.send(`❌ Erro: ${e.message}`);
   } finally {
-    if (filePath) { try { await fsp.unlink(filePath); } catch {} }
+    if (filePath) {
+      try { await fsp.unlink(filePath); } catch {}
+    }
   }
 });
 
