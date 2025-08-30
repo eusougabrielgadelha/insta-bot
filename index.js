@@ -31,18 +31,19 @@ const httpsAgentV4 = new https.Agent({
   lookup: (hostname, options, cb) => dns.lookup(hostname, { family: 4, all: false }, cb)
 });
 
-// ---- Helpers ----
+// ---------- yt-dlp helpers ----------
 
 // Monta os argumentos do yt-dlp (com ou sem cookies) – força merge para mp4
-function buildYtDlpArgs(reelUrl, template, useCookies) {
+function buildYtDlpArgs(mediaUrl, template, useCookies) {
   const args = [
     '-S', 'ext:mp4:m4v',
     '--no-playlist',
     '--merge-output-format', 'mp4',     // força saída final mp4
     '-o', template,
-    reelUrl
+    mediaUrl
   ];
 
+  // Cookies (só serão úteis para Instagram/privados; TikTok costuma baixar sem)
   if (useCookies) {
     if (IG_COOKIES_FILE) {
       args.unshift('--cookies', IG_COOKIES_FILE);
@@ -58,25 +59,26 @@ function buildYtDlpArgs(reelUrl, template, useCookies) {
 async function runYtDlp(args) {
   try {
     const { stdout, stderr } = await execFileP('yt-dlp', args, { maxBuffer: 1024 * 1024 * 1024 });
-    if (stdout) console.log('[yt-dlp stdout]', stdout.slice(0, 1000));
-    if (stderr) console.log('[yt-dlp stderr]', stderr.slice(0, 1000));
+    if (stdout) console.log('[yt-dlp stdout]', stdout.slice(0, 2000));
+    if (stderr) console.log('[yt-dlp stderr]', stderr.slice(0, 2000));
   } catch (e) {
     throw new Error(`Falha no yt-dlp: ${e.message}`);
   }
 }
 
-async function downloadReelWithYtDlp(reelUrl, tmpDir, id) {
+// Download genérico (TikTok/Instagram/etc.)
+async function downloadWithYtDlp(mediaUrl, tmpDir, id) {
   await fsp.mkdir(tmpDir, { recursive: true });
   const template = nodePath.join(tmpDir, `${id}.%(ext)s`);
 
   // 1) tentativa sem cookies
   try {
-    await runYtDlp(buildYtDlpArgs(reelUrl, template, false));
+    await runYtDlp(buildYtDlpArgs(mediaUrl, template, false));
   } catch (e1) {
     // 2) se temos cookies configurados, tenta de novo
     if (IG_COOKIES_FILE || IG_COOKIE || IG_SESSIONID) {
       console.warn('[yt-dlp] sem cookies falhou, tentando com cookies…');
-      await runYtDlp(buildYtDlpArgs(reelUrl, template, true));
+      await runYtDlp(buildYtDlpArgs(mediaUrl, template, true));
     } else {
       throw e1;
     }
@@ -127,13 +129,15 @@ async function downloadReelWithYtDlp(reelUrl, tmpDir, id) {
   return bestVideoOnly;
 }
 
-// Upload em transfer.sh (IPv4) -> URL pública (MANTÉM httpsAgentV4 AQUI)
+// ---------- Upload helpers ----------
+
+// Upload em transfer.sh (IPv4) -> URL pública
 async function uploadToTransferSh(localPath) {
   const fileName = nodePath.basename(localPath);
   const stream = fs.createReadStream(localPath);
   const url = `https://transfer.sh/${encodeURIComponent(fileName)}`;
   const res = await axios.put(url, stream, {
-    httpsAgent: httpsAgentV4, // <- continua AQUI
+    httpsAgent: httpsAgentV4, // IPv4 apenas aqui
     headers: { 'Content-Type': 'application/octet-stream' },
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
@@ -144,7 +148,7 @@ async function uploadToTransferSh(localPath) {
   return link;
 }
 
-// Fallback 1: upload em file.io -> URL pública (SEM httpsAgent aqui)
+// Fallback 1: upload em file.io -> URL pública (sem httpsAgent)
 async function uploadToFileIO(localPath) {
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
@@ -180,11 +184,13 @@ async function postToMake({ caption, reelUrl, videoUrl, source = 'discord-bot' }
   if (res.status >= 400) throw new Error(`Webhook Make retornou HTTP ${res.status}: ${JSON.stringify(res.data)}`);
 }
 
-// ---- Discord Bot ----
+// ---------- Discord Bot ----------
+
 const bot = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
+// Aceita qualquer URL após a legenda
 const CMD = /^!postar\s+[-–—]{1,2}legenda\s+(.+?)\s+(https?:\/\/\S+)/i;
 
 bot.once('ready', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
@@ -195,7 +201,7 @@ bot.on('messageCreate', async (msg) => {
   if (!m) return;
 
   const caption = m[1].trim();
-  const reelUrl = m[2].trim();
+  const mediaUrl = m[2].trim(); // TikTok/Instagram/etc.
 
   const id = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   const tmpDir = nodePath.join(__dirname, 'tmp');
@@ -206,14 +212,12 @@ bot.on('messageCreate', async (msg) => {
 
     // 1) DOWNLOAD
     await msg.channel.send('⬇️ Baixando vídeo (yt-dlp)…');
-    filePath = await downloadReelWithYtDlp(reelUrl, tmpDir, id);
+    filePath = await downloadWithYtDlp(mediaUrl, tmpDir, id);
 
     // sanity-check
     if (!filePath) throw new Error('Download falhou: nenhum arquivo gerado pelo yt-dlp');
     await fsp.access(filePath); // lança se não existir
     console.log('[DL DONE]', { id, tmpDir, filePath });
-    // opcional: listar tmp pra debug
-    // console.log('[DL LIST]', await fsp.readdir(tmpDir));
 
     // 2) UPLOAD (com 3 fallbacks)
     await msg.channel.send('☁️ Enviando arquivo para link público…');
@@ -234,7 +238,7 @@ bot.on('messageCreate', async (msg) => {
 
     // 3) MAKE WEBHOOK
     await msg.channel.send('📨 Disparando para o Make…');
-    await postToMake({ caption, reelUrl, videoUrl: publicUrl });
+    await postToMake({ caption, reelUrl: mediaUrl, videoUrl: publicUrl });
 
     await msg.channel.send('✅ Enviado! (Make vai processar o post)');
   } catch (e) {
