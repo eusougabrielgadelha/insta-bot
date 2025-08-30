@@ -19,7 +19,15 @@ import { promisify } from 'node:util';
 const execFileP = promisify(execFile);
 
 // ---- ENV ----
-const { DISCORD_TOKEN, MAKE_WEBHOOK_URL, IG_SESSIONID, IG_COOKIE, IG_COOKIES_FILE } = process.env;
+const {
+  DISCORD_TOKEN,
+  MAKE_WEBHOOK_URL,
+  // Instagram
+  IG_SESSIONID, IG_COOKIE, IG_COOKIES_FILE,
+  // TikTok
+  TIKTOK_COOKIES_FILE
+} = process.env;
+
 if (!DISCORD_TOKEN || !MAKE_WEBHOOK_URL) {
   console.error('Preencha DISCORD_TOKEN e MAKE_WEBHOOK_URL no .env');
   process.exit(1);
@@ -31,6 +39,26 @@ const httpsAgentV4 = new https.Agent({
   lookup: (hostname, options, cb) => dns.lookup(hostname, { family: 4, all: false }, cb)
 });
 
+// ---------- helpers de domínio/URL ----------
+function isTikTok(url) { try { return new URL(url).hostname.includes('tiktok.com'); } catch { return false; } }
+function isInstagram(url) { try { return new URL(url).hostname.includes('instagram.com'); } catch { return false; } }
+function sanitizeMediaUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname.includes('tiktok.com')) {
+      // mantém /@user/video/ID e remove query
+      const m = u.pathname.match(/^\/@[^/]+\/video\/(\d+)/);
+      if (m) return `https://www.tiktok.com${m[0]}`;
+    }
+    // fallback: remove query/fragment
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 // ---------- yt-dlp helpers ----------
 
 // Monta os argumentos do yt-dlp (com ou sem cookies) – força merge para mp4
@@ -38,19 +66,28 @@ function buildYtDlpArgs(mediaUrl, template, useCookies) {
   const args = [
     '-S', 'ext:mp4:m4v',
     '--no-playlist',
-    '--merge-output-format', 'mp4',     // força saída final mp4
+    '--merge-output-format', 'mp4',
+    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36',
+    // TikTok costuma verificar referer
+    ...(isTikTok(mediaUrl) ? ['--add-header', 'Referer: https://www.tiktok.com/'] : []),
     '-o', template,
     mediaUrl
   ];
 
-  // Cookies (só serão úteis para Instagram/privados; TikTok costuma baixar sem)
   if (useCookies) {
-    if (IG_COOKIES_FILE) {
-      args.unshift('--cookies', IG_COOKIES_FILE);
-    } else if (IG_COOKIE) {
-      args.unshift('--add-header', `Cookie: ${IG_COOKIE}`);
-    } else if (IG_SESSIONID) {
-      args.unshift('--add-header', `Cookie: sessionid=${IG_SESSIONID}`);
+    if (isTikTok(mediaUrl)) {
+      if (TIKTOK_COOKIES_FILE) {
+        args.unshift('--cookies', TIKTOK_COOKIES_FILE);
+      }
+      // Não use cookies do Instagram no TikTok
+    } else if (isInstagram(mediaUrl)) {
+      if (IG_COOKIES_FILE) {
+        args.unshift('--cookies', IG_COOKIES_FILE);
+      } else if (IG_COOKIE) {
+        args.unshift('--add-header', `Cookie: ${IG_COOKIE}`);
+      } else if (IG_SESSIONID) {
+        args.unshift('--add-header', `Cookie: sessionid=${IG_SESSIONID}`);
+      }
     }
   }
   return args;
@@ -75,9 +112,11 @@ async function downloadWithYtDlp(mediaUrl, tmpDir, id) {
   try {
     await runYtDlp(buildYtDlpArgs(mediaUrl, template, false));
   } catch (e1) {
-    // 2) se temos cookies configurados, tenta de novo
-    if (IG_COOKIES_FILE || IG_COOKIE || IG_SESSIONID) {
-      console.warn('[yt-dlp] sem cookies falhou, tentando com cookies…');
+    // 2) se temos cookies configurados do domínio, tenta de novo
+    const haveTikTokCookies = isTikTok(mediaUrl) && !!TIKTOK_COOKIES_FILE;
+    const haveIgCookies = isInstagram(mediaUrl) && (IG_COOKIES_FILE || IG_COOKIE || IG_SESSIONID);
+    if (haveTikTokCookies || haveIgCookies) {
+      console.warn('[yt-dlp] sem cookies falhou, tentando com cookies específicos do domínio…');
       await runYtDlp(buildYtDlpArgs(mediaUrl, template, true));
     } else {
       throw e1;
@@ -201,7 +240,8 @@ bot.on('messageCreate', async (msg) => {
   if (!m) return;
 
   const caption = m[1].trim();
-  const mediaUrl = m[2].trim(); // TikTok/Instagram/etc.
+  const rawUrl = m[2].trim();
+  const mediaUrl = sanitizeMediaUrl(rawUrl); // limpa TikTok etc.
 
   const id = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   const tmpDir = nodePath.join(__dirname, 'tmp');
