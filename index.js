@@ -215,16 +215,28 @@ const bot = new Client({
 });
 
 // Aceita: !postar --legenda <texto> <URL-Instagram>
-const CMD = /^!postar\s+[-–—]{1,2}legenda\s+(.+?)\s+(https?:\/\/\S+)/i;
+const CMD = /^!postar(?:\s+[-–—]{1,2}legenda\s+(.+?))?\s+(https?:\/\/\S+)/i;
 
 bot.once('ready', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
 
 bot.on('messageCreate', async (msg) => {
   if (msg.author.bot) return;
+
+  // se começou com !postar mas não bateu, mostra ajuda
+  if (msg.content.trim().toLowerCase().startsWith('!postar') && !CMD.test(msg.content)) {
+    await msg.channel.send(
+      '⚙️ Uso:\n' +
+      '`!postar --legenda <texto opcional> <URL do Instagram>`\n' +
+      'Ex1: `!postar --legenda Bom dia! https://www.instagram.com/reel/...`\n' +
+      'Ex2: `!postar https://www.instagram.com/reel/...`'
+    );
+    return;
+  }
+
   const m = msg.content.match(CMD);
   if (!m) return;
 
-  const caption = m[1].trim();
+  const caption = (m[1] || '').trim();   // legenda opcional
   const rawUrl = m[2].trim();
   const igUrl = sanitizeInstagramUrl(rawUrl);
 
