@@ -26,9 +26,8 @@ if (!DISCORD_TOKEN || !MAKE_WEBHOOK_URL) {
 }
 console.log('[BOOT]', { file: __filename, cwd: process.cwd(), node: process.versions.node });
 
-// ---- Força IPv4 em HTTPS (evita ETIMEDOUT por IPv6) – usaremos no transfer.sh ----
+// ---- Força IPv4 em HTTPS (evita ETIMEDOUT por IPv6) – manteremos disponível se precisar ----
 const httpsAgentV4 = new https.Agent({
-  // dns.lookup recebe (hostname, options, callback)
   lookup: (hostname, opts, cb) => dns.lookup(hostname, { family: 4, all: false }, cb),
 });
 
@@ -132,40 +131,9 @@ async function existsNonEmpty(p) {
   } catch { return false; }
 }
 
-// Upload em transfer.sh (IPv4) -> URL pública
-async function uploadToTransferSh(localPath) {
-  const fileName = nodePath.basename(localPath);
-  const stream = fs.createReadStream(localPath);
-  const url = `https://transfer.sh/${encodeURIComponent(fileName)}`;
-  const res = await axios.put(url, stream, {
-    httpsAgent: httpsAgentV4, // força IPv4 aqui
-    headers: { 'Content-Type': 'application/octet-stream' },
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-    timeout: 300000
-  });
-  const link = String(res.data || '').trim();
-  if (!/^https?:\/\//.test(link)) throw new Error('Upload no transfer.sh não retornou link válido: ' + link);
-  return link;
-}
+// ---------------- Uploads (ordem: file.io -> catbox -> transfer.sh via curl) ----------------
 
-// Fallback 2: 0x0.st (muito simples e estável)
-async function uploadTo0x0(localPath) {
-  const form = new FormData();
-  form.append('file', fs.createReadStream(localPath));
-  const res = await axios.post('https://0x0.st', form, {
-    headers: form.getHeaders(),
-    timeout: 180000,
-    maxBodyLength: Infinity
-  });
-  const link = String(res.data || '').trim();
-  if (!/^https?:\/\/0x0\.st\/\w+/.test(link)) {
-    throw new Error('Upload no 0x0.st não retornou link válido: ' + link);
-  }
-  return link;
-}
-
-// Fallback 3: file.io (sem forçar IPv4)
+// 1) file.io (sem forçar IPv4)
 async function uploadToFileIO(localPath) {
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
@@ -178,7 +146,36 @@ async function uploadToFileIO(localPath) {
   return String(res.data.link).trim();
 }
 
-// Dispara para o Make
+// 2) catbox.moe (estável; até ~200MB)
+async function uploadToCatbox(localPath) {
+  const form = new FormData();
+  form.append('reqtype', 'fileupload');
+  form.append('fileToUpload', fs.createReadStream(localPath));
+  const res = await axios.post('https://catbox.moe/user/api.php', form, {
+    headers: form.getHeaders({ 'User-Agent': 'curl/8 bot' }),
+    timeout: 180000,
+    maxBodyLength: Infinity,
+    validateStatus: () => true
+  });
+  const link = String(res.data || '').trim();
+  if (res.status >= 400 || !/^https?:\/\/files\.catbox\.moe\//.test(link)) {
+    throw new Error(`Upload no catbox falhou (HTTP ${res.status}): ${link}`);
+  }
+  return link;
+}
+
+// 3) transfer.sh via cURL (resolve os problemas de IPv6/DNS que vimos com Axios)
+async function uploadToTransferCurl(localPath) {
+  const fileName = nodePath.basename(localPath);
+  const { stdout } = await execFileP('curl', [
+    '--silent', '--show-error', '--fail', '--upload-file', localPath, `https://transfer.sh/${fileName}`
+  ]);
+  const link = String(stdout || '').trim();
+  if (!/^https?:\/\//.test(link)) throw new Error('Upload no transfer.sh não retornou link válido: ' + link);
+  return link;
+}
+
+// ---------------- Webhook (Make) ----------------
 async function postToMake({ caption, reelUrl, videoUrl, source = 'discord-bot' }) {
   const payload = { caption, reel_url: reelUrl, video_url: videoUrl, source, ts: new Date().toISOString() };
   const res = await axios.post(MAKE_WEBHOOK_URL, payload, { timeout: 60000, validateStatus: () => true });
@@ -190,6 +187,7 @@ const bot = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
+// Comando simples: !postar <url-do-instagram>
 const CMD = /^!postar\s+(https?:\/\/\S+)/i;
 
 bot.once('ready', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
@@ -215,7 +213,6 @@ bot.on('messageCreate', async (msg) => {
     await msg.channel.send('⬇️ Baixando vídeo do Instagram…');
     filePath = await downloadFromInstagram(url, tmpDir, id);
 
-    // sanity check
     if (!(await existsNonEmpty(filePath))) {
       throw new Error('Download não gerou arquivo válido.');
     }
@@ -223,16 +220,19 @@ bot.on('messageCreate', async (msg) => {
     await msg.channel.send('☁️ Enviando arquivo para link público…');
     let publicUrl;
     try {
-      publicUrl = await uploadToTransferSh(filePath);      // 1º
-    } catch (err1) {
-      console.warn('[transfer.sh falhou]', err1?.message || err1);
-      await msg.channel.send('⚠️ transfer.sh indisponível, tentando 0x0.st…');
+      // 1º: file.io
+      publicUrl = await uploadToFileIO(filePath);
+    } catch (e1) {
+      console.warn('[file.io falhou]', e1?.message || e1);
+      await msg.channel.send('⚠️ file.io indisponível, tentando catbox…');
       try {
-        publicUrl = await uploadTo0x0(filePath);           // 2º
-      } catch (err2) {
-        console.warn('[0x0.st falhou]', err2?.message || err2);
-        await msg.channel.send('⚠️ 0x0.st indisponível, tentando file.io…');
-        publicUrl = await uploadToFileIO(filePath);        // 3º
+        // 2º: catbox.moe
+        publicUrl = await uploadToCatbox(filePath);
+      } catch (e2) {
+        console.warn('[catbox falhou]', e2?.message || e2);
+        await msg.channel.send('⚠️ catbox indisponível, tentando transfer.sh…');
+        // 3º: transfer.sh via curl
+        publicUrl = await uploadToTransferCurl(filePath);
       }
     }
 
