@@ -1,4 +1,4 @@
-// ---- .env da mesma pasta (independe do CWD do PM2) ----
+// ---- Carrega .env da mesma pasta (independe do CWD do PM2) ----
 import dotenv from 'dotenv';
 import * as nodePath from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,14 +18,13 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileP = promisify(execFile);
 
-// ---- ENV ----
+// ---- ENV (somente Instagram) ----
 const {
   DISCORD_TOKEN,
   MAKE_WEBHOOK_URL,
-  // Instagram
-  IG_SESSIONID, IG_COOKIE, IG_COOKIES_FILE,
-  // TikTok
-  TIKTOK_COOKIES_FILE
+  IG_COOKIES_FILE,  // caminho do cookies.txt (Netscape) — preferível
+  IG_COOKIE,        // linha completa de Cookie (ex.: 'sessionid=...; csrftoken=...')
+  IG_SESSIONID      // fallback simples: só o sessionid
 } = process.env;
 
 if (!DISCORD_TOKEN || !MAKE_WEBHOOK_URL) {
@@ -34,23 +33,21 @@ if (!DISCORD_TOKEN || !MAKE_WEBHOOK_URL) {
 }
 console.log('[BOOT]', { file: __filename, cwd: process.cwd(), node: process.versions.node });
 
-// ---- Força IPv4 em HTTPS (evita ETIMEDOUT por IPv6) – usaremos só no transfer.sh ----
+// ---- HTTPS IPv4 apenas para transfer.sh (evita ETIMEDOUT via IPv6) ----
 const httpsAgentV4 = new https.Agent({
-  lookup: (hostname, options, cb) => dns.lookup(hostname, { family: 4, all: false }, cb)
+  lookup: (hostname, opts, cb) => dns.lookup(hostname, { family: 4, all: false }, cb)
 });
 
-// ---------- helpers de domínio/URL ----------
-function isTikTok(url) { try { return new URL(url).hostname.includes('tiktok.com'); } catch { return false; } }
-function isInstagram(url) { try { return new URL(url).hostname.includes('instagram.com'); } catch { return false; } }
-function sanitizeMediaUrl(url) {
+// ---------- Helpers Instagram/URL ----------
+function isInstagram(url) {
+  try { return new URL(url).hostname.includes('instagram.com'); }
+  catch { return false; }
+}
+
+// remove query/fragment; mantém caminho original (/reel/, /p/, /tv/ etc.)
+function sanitizeInstagramUrl(url) {
   try {
     const u = new URL(url);
-    if (u.hostname.includes('tiktok.com')) {
-      // mantém /@user/video/ID e remove query
-      const m = u.pathname.match(/^\/@[^/]+\/video\/(\d+)/);
-      if (m) return `https://www.tiktok.com${m[0]}`;
-    }
-    // fallback: remove query/fragment
     u.search = '';
     u.hash = '';
     return u.toString();
@@ -59,35 +56,26 @@ function sanitizeMediaUrl(url) {
   }
 }
 
-// ---------- yt-dlp helpers ----------
+// ---------- yt-dlp helpers (Instagram) ----------
 
-// Monta os argumentos do yt-dlp (com ou sem cookies) – força merge para mp4
-function buildYtDlpArgs(mediaUrl, template, useCookies) {
+// Monta args do yt-dlp (força saída mp4 e usa cookies se disponíveis)
+function buildYtDlpArgs(igUrl, template, useCookies) {
   const args = [
     '-S', 'ext:mp4:m4v',
     '--no-playlist',
     '--merge-output-format', 'mp4',
     '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36',
-    // TikTok costuma verificar referer
-    ...(isTikTok(mediaUrl) ? ['--add-header', 'Referer: https://www.tiktok.com/'] : []),
     '-o', template,
-    mediaUrl
+    igUrl
   ];
 
   if (useCookies) {
-    if (isTikTok(mediaUrl)) {
-      if (TIKTOK_COOKIES_FILE) {
-        args.unshift('--cookies', TIKTOK_COOKIES_FILE);
-      }
-      // Não use cookies do Instagram no TikTok
-    } else if (isInstagram(mediaUrl)) {
-      if (IG_COOKIES_FILE) {
-        args.unshift('--cookies', IG_COOKIES_FILE);
-      } else if (IG_COOKIE) {
-        args.unshift('--add-header', `Cookie: ${IG_COOKIE}`);
-      } else if (IG_SESSIONID) {
-        args.unshift('--add-header', `Cookie: sessionid=${IG_SESSIONID}`);
-      }
+    if (IG_COOKIES_FILE) {
+      args.unshift('--cookies', IG_COOKIES_FILE);
+    } else if (IG_COOKIE) {
+      args.unshift('--add-header', `Cookie: ${IG_COOKIE}`);
+    } else if (IG_SESSIONID) {
+      args.unshift('--add-header', `Cookie: sessionid=${IG_SESSIONID}`);
     }
   }
   return args;
@@ -103,21 +91,30 @@ async function runYtDlp(args) {
   }
 }
 
-// Download genérico (TikTok/Instagram/etc.)
-async function downloadWithYtDlp(mediaUrl, tmpDir, id) {
+// Download apenas do Instagram
+async function downloadInstagram(igUrl, tmpDir, id) {
+  if (!isInstagram(igUrl)) {
+    throw new Error('URL não é do Instagram.');
+  }
+
   await fsp.mkdir(tmpDir, { recursive: true });
   const template = nodePath.join(tmpDir, `${id}.%(ext)s`);
 
-  // 1) tentativa sem cookies
+  // Estratégia: tentar PRIMEIRO com cookies (IG quase sempre exige login), depois sem.
+  const hasAnyCookie = !!(IG_COOKIES_FILE || IG_COOKIE || IG_SESSIONID);
+
   try {
-    await runYtDlp(buildYtDlpArgs(mediaUrl, template, false));
+    if (hasAnyCookie) {
+      console.log('[yt-dlp] tentando com cookies IG…');
+      await runYtDlp(buildYtDlpArgs(igUrl, template, true));
+    } else {
+      console.log('[yt-dlp] tentando sem cookies…');
+      await runYtDlp(buildYtDlpArgs(igUrl, template, false));
+    }
   } catch (e1) {
-    // 2) se temos cookies configurados do domínio, tenta de novo
-    const haveTikTokCookies = isTikTok(mediaUrl) && !!TIKTOK_COOKIES_FILE;
-    const haveIgCookies = isInstagram(mediaUrl) && (IG_COOKIES_FILE || IG_COOKIE || IG_SESSIONID);
-    if (haveTikTokCookies || haveIgCookies) {
-      console.warn('[yt-dlp] sem cookies falhou, tentando com cookies específicos do domínio…');
-      await runYtDlp(buildYtDlpArgs(mediaUrl, template, true));
+    if (hasAnyCookie) {
+      console.warn('[yt-dlp] com cookies falhou, tentando SEM cookies…');
+      await runYtDlp(buildYtDlpArgs(igUrl, template, false));
     } else {
       throw e1;
     }
@@ -149,15 +146,8 @@ async function downloadWithYtDlp(mediaUrl, tmpDir, id) {
     if (m4a) {
       const audioPath = nodePath.join(tmpDir, m4a);
       const out = nodePath.join(tmpDir, `${id}.mp4`);
-      // usa ffmpeg (precisa estar instalado)
-      await execFileP('ffmpeg', [
-        '-y',
-        '-i', bestVideoOnly,
-        '-i', audioPath,
-        '-c', 'copy',
-        out
-      ], { maxBuffer: 1024 * 1024 * 1024 });
-      // se tudo ok, retornar o merged
+      await execFileP('ffmpeg', ['-y', '-i', bestVideoOnly, '-i', audioPath, '-c', 'copy', out],
+        { maxBuffer: 1024 * 1024 * 1024 });
       return out;
     }
   } catch (e) {
@@ -169,14 +159,12 @@ async function downloadWithYtDlp(mediaUrl, tmpDir, id) {
 }
 
 // ---------- Upload helpers ----------
-
-// Upload em transfer.sh (IPv4) -> URL pública
 async function uploadToTransferSh(localPath) {
   const fileName = nodePath.basename(localPath);
   const stream = fs.createReadStream(localPath);
   const url = `https://transfer.sh/${encodeURIComponent(fileName)}`;
   const res = await axios.put(url, stream, {
-    httpsAgent: httpsAgentV4, // IPv4 apenas aqui
+    httpsAgent: httpsAgentV4,
     headers: { 'Content-Type': 'application/octet-stream' },
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
@@ -187,7 +175,6 @@ async function uploadToTransferSh(localPath) {
   return link;
 }
 
-// Fallback 1: upload em file.io -> URL pública (sem httpsAgent)
 async function uploadToFileIO(localPath) {
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
@@ -200,7 +187,6 @@ async function uploadToFileIO(localPath) {
   return String(res.data.link).trim();
 }
 
-// Fallback 2: upload em 0x0.st -> URL pública
 async function uploadTo0x0(localPath) {
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
@@ -216,7 +202,7 @@ async function uploadTo0x0(localPath) {
   return link;
 }
 
-// Envia payload para o Make
+// ---------- Make ----------
 async function postToMake({ caption, reelUrl, videoUrl, source = 'discord-bot' }) {
   const payload = { caption, reel_url: reelUrl, video_url: videoUrl, source, ts: new Date().toISOString() };
   const res = await axios.post(MAKE_WEBHOOK_URL, payload, { timeout: 60000, validateStatus: () => true });
@@ -224,12 +210,11 @@ async function postToMake({ caption, reelUrl, videoUrl, source = 'discord-bot' }
 }
 
 // ---------- Discord Bot ----------
-
 const bot = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-// Aceita qualquer URL após a legenda
+// Aceita: !postar --legenda <texto> <URL-Instagram>
 const CMD = /^!postar\s+[-–—]{1,2}legenda\s+(.+?)\s+(https?:\/\/\S+)/i;
 
 bot.once('ready', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
@@ -241,7 +226,7 @@ bot.on('messageCreate', async (msg) => {
 
   const caption = m[1].trim();
   const rawUrl = m[2].trim();
-  const mediaUrl = sanitizeMediaUrl(rawUrl); // limpa TikTok etc.
+  const igUrl = sanitizeInstagramUrl(rawUrl);
 
   const id = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   const tmpDir = nodePath.join(__dirname, 'tmp');
@@ -251,43 +236,38 @@ bot.on('messageCreate', async (msg) => {
     await fsp.mkdir(tmpDir, { recursive: true });
 
     // 1) DOWNLOAD
-    await msg.channel.send('⬇️ Baixando vídeo (yt-dlp)…');
-    filePath = await downloadWithYtDlp(mediaUrl, tmpDir, id);
+    await msg.channel.send('⬇️ Baixando vídeo do Instagram…');
+    filePath = await downloadInstagram(igUrl, tmpDir, id);
+    await fsp.access(filePath); // sanity-check
+    console.log('[DL DONE]', { id, filePath });
 
-    // sanity-check
-    if (!filePath) throw new Error('Download falhou: nenhum arquivo gerado pelo yt-dlp');
-    await fsp.access(filePath); // lança se não existir
-    console.log('[DL DONE]', { id, tmpDir, filePath });
-
-    // 2) UPLOAD (com 3 fallbacks)
+    // 2) UPLOAD (com fallbacks)
     await msg.channel.send('☁️ Enviando arquivo para link público…');
     let publicUrl;
     try {
-      publicUrl = await uploadToTransferSh(filePath);               // 1º
+      publicUrl = await uploadToTransferSh(filePath);
     } catch (err1) {
       console.warn('[transfer.sh falhou]', err1?.message || err1);
       await msg.channel.send('⚠️ transfer.sh indisponível, tentando file.io…');
       try {
-        publicUrl = await uploadToFileIO(filePath);                 // 2º
+        publicUrl = await uploadToFileIO(filePath);
       } catch (err2) {
         console.warn('[file.io falhou]', err2?.message || err2);
         await msg.channel.send('⚠️ file.io indisponível, tentando 0x0.st…');
-        publicUrl = await uploadTo0x0(filePath);                    // 3º
+        publicUrl = await uploadTo0x0(filePath);
       }
     }
 
-    // 3) MAKE WEBHOOK
+    // 3) MAKE
     await msg.channel.send('📨 Disparando para o Make…');
-    await postToMake({ caption, reelUrl: mediaUrl, videoUrl: publicUrl });
+    await postToMake({ caption, reelUrl: igUrl, videoUrl: publicUrl });
 
     await msg.channel.send('✅ Enviado! (Make vai processar o post)');
   } catch (e) {
     console.error(e);
     await msg.channel.send(`❌ Erro: ${e.message}`);
   } finally {
-    if (filePath) {
-      try { await fsp.unlink(filePath); } catch {}
-    }
+    if (filePath) { try { await fsp.unlink(filePath); } catch {} }
   }
 });
 
