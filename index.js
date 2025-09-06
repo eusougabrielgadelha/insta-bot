@@ -24,14 +24,21 @@ const {
   MAKE_WEBHOOK_URL,
   IG_SESSIONID,
   IG_USER,
-  IG_PASS
+  IG_PASS,
+  INSTALOADER_BIN // opcional (ex.: /root/.local/bin/instaloader)
 } = process.env;
 
 if (!DISCORD_TOKEN || !MAKE_WEBHOOK_URL) {
   console.error('Preencha DISCORD_TOKEN e MAKE_WEBHOOK_URL no .env');
   process.exit(1);
 }
-console.log('[BOOT]', { file: __filename, cwd: process.cwd(), node: process.versions.node });
+console.log('[BOOT]', {
+  file: __filename,
+  cwd: process.cwd(),
+  node: process.versions.node,
+  PATH: process.env.PATH,
+  instaloaderBin: INSTALOADER_BIN || 'instaloader'
+});
 
 // ---- Força IPv4 só no transfer.sh (evita IPv6 ruim) ----
 const httpsAgentV4 = new https.Agent({
@@ -47,51 +54,42 @@ async function existsNonEmpty(p) {
 }
 
 // ---- Download com Instaloader ----
-/**
- * Baixa um único post/reel do Instagram usando Instaloader.
- * @param {string} instaUrl - URL do post/reel
- * @param {string} tmpDir - diretório temporário
- * @param {string} id - identificador único (para nome do arquivo)
- * @returns {Promise<string>} caminho do .mp4 baixado
- */
 async function downloadWithInstaloader(instaUrl, tmpDir, id) {
   await fsp.mkdir(tmpDir, { recursive: true });
 
-  // Vamos instruir o Instaloader a gravar direto em tmpDir com nome fixo `${id}.mp4`
-  // Observação: em versões atuais, ele respeita --dirname-pattern/--filename-pattern
-  // para posts/reels individuais passados como URL/shortcode.
-  const argsBase = [
+  const bin = INSTALOADER_BIN || 'instaloader';
+  const args = [
     '--no-captions',
     '--no-compress-json',
     '--no-metadata-json',
     '--dirname-pattern', tmpDir,
-    '--filename-pattern', id,
+    '--filename-pattern', id
   ];
 
-  // Autenticação (prioridade: sessionid > user/pass > anônimo)
   if (IG_SESSIONID) {
-    argsBase.push('--sessionid', IG_SESSIONID);
+    args.push('--sessionid', IG_SESSIONID);
   } else if (IG_USER && IG_PASS) {
-    argsBase.push('--login', IG_USER, '--password', IG_PASS);
+    args.push('--login', IG_USER, '--password', IG_PASS);
   }
 
-  // Target: passamos a URL explicitamente após um "--"
-  const args = [...argsBase, '--', instaUrl];
+  // alvo (URL) após "--"
+  args.push('--', instaUrl);
+
+  console.log('[instaloader CMD]', bin, args.join(' '));
 
   try {
-    const { stdout, stderr } = await execFileP('instaloader', args, { maxBuffer: 1024 * 1024 * 1024 });
-    if (stdout) console.log('[instaloader stdout]', stdout.split('\n').slice(-15).join('\n'));
-    if (stderr) console.log('[instaloader stderr]', stderr.split('\n').slice(-15).join('\n'));
+    const { stdout, stderr } = await execFileP(bin, args, { maxBuffer: 1024 * 1024 * 1024 });
+    if (stdout) console.log('[instaloader stdout]', stdout.split('\n').slice(-20).join('\n'));
+    if (stderr) console.log('[instaloader stderr]', stderr.split('\n').slice(-20).join('\n'));
   } catch (e) {
     throw new Error(`Falha no Instaloader: ${e.message}`);
   }
 
-  // Procurar o arquivo que acabamos de pedir: ${id}.mp4 no tmpDir
+  // 1) nome esperado (id.mp4)
   const expected = nodePath.join(tmpDir, `${id}.mp4`);
   if (await existsNonEmpty(expected)) return expected;
 
-  // Caso o padrão não seja respeitado (algumas versões variam),
-  // buscamos o .mp4 mais novo gerado dentro de tmpDir.
+  // 2) caso o padrão varie, pega o .mp4 mais novo do tmpDir
   const entries = await fsp.readdir(tmpDir);
   let newest = null;
   for (const name of entries) {
@@ -104,20 +102,20 @@ async function downloadWithInstaloader(instaUrl, tmpDir, id) {
   }
   if (newest?.full) return newest.full;
 
-  throw new Error('Instaloader não gerou .mp4 (talvez bloqueio/login exigido).');
+  throw new Error('Instaloader não gerou .mp4 (pode exigir login/challenge).');
 }
 
 // ---- Uploads (transfer.sh -> 0x0.st -> file.io) ----
 async function uploadToTransferSh(localPath) {
   const fileName = nodePath.basename(localPath);
   const url = `https://transfer.sh/${encodeURIComponent(fileName)}`;
-  const stream = fs.createReadStream(localPath);
-  const res = await axios.put(url, stream, {
+  console.log('[upload] transfer.sh ->', url);
+  const res = await axios.put(url, fs.createReadStream(localPath), {
     httpsAgent: httpsAgentV4,
     headers: { 'Content-Type': 'application/octet-stream' },
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
-    timeout: 300000,
+    timeout: 300000
   });
   const link = String(res.data || '').trim();
   if (!/^https?:\/\//.test(link)) throw new Error('Upload no transfer.sh não retornou link válido: ' + link);
@@ -125,12 +123,13 @@ async function uploadToTransferSh(localPath) {
 }
 
 async function uploadTo0x0(localPath) {
+  console.log('[upload] 0x0.st');
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
   const res = await axios.post('https://0x0.st', form, {
     headers: form.getHeaders(),
     timeout: 180000,
-    maxBodyLength: Infinity,
+    maxBodyLength: Infinity
   });
   const link = String(res.data || '').trim();
   if (!/^https?:\/\/0x0\.st\/\w+/.test(link)) {
@@ -140,12 +139,13 @@ async function uploadTo0x0(localPath) {
 }
 
 async function uploadToFileIO(localPath) {
+  console.log('[upload] file.io');
   const form = new FormData();
   form.append('file', fs.createReadStream(localPath));
   const res = await axios.post('https://file.io', form, {
     headers: form.getHeaders(),
     timeout: 180000,
-    maxBodyLength: Infinity,
+    maxBodyLength: Infinity
   });
   if (!res.data || !res.data.link) throw new Error('Upload no file.io falhou: ' + JSON.stringify(res.data || {}));
   return String(res.data.link).trim();
@@ -163,7 +163,7 @@ const bot = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-// Comando simples: !postar <url-do-instagram>
+// !postar <url-instagram>
 const CMD = /^!postar\s+(https?:\/\/\S+)/i;
 
 bot.once('ready', () => console.log(`🤖 Bot online: ${bot.user.tag}`));
@@ -175,7 +175,6 @@ bot.on('messageCreate', async (msg) => {
 
   const url = m[1].trim();
 
-  // Apenas Instagram
   if (!/https?:\/\/(www\.)?instagram\.com\//i.test(url)) {
     await msg.channel.send('❌ Por enquanto aceito apenas links do Instagram (reels/post).');
     return;
@@ -196,16 +195,16 @@ bot.on('messageCreate', async (msg) => {
     await msg.channel.send('☁️ Enviando arquivo para link público…');
     let publicUrl;
     try {
-      publicUrl = await uploadToTransferSh(filePath);       // 1º
+      publicUrl = await uploadToTransferSh(filePath);
     } catch (err1) {
       console.warn('[transfer.sh falhou]', err1?.message || err1);
       await msg.channel.send('⚠️ transfer.sh indisponível, tentando 0x0.st…');
       try {
-        publicUrl = await uploadTo0x0(filePath);            // 2º
+        publicUrl = await uploadTo0x0(filePath);
       } catch (err2) {
         console.warn('[0x0.st falhou]', err2?.message || err2);
         await msg.channel.send('⚠️ 0x0.st indisponível, tentando file.io…');
-        publicUrl = await uploadToFileIO(filePath);         // 3º
+        publicUrl = await uploadToFileIO(filePath);
       }
     }
 
@@ -221,7 +220,6 @@ bot.on('messageCreate', async (msg) => {
   }
 });
 
-// Logs úteis
 bot.on('error', (e) => console.error('[DISCORD ERROR]', e));
 bot.on('shardError', (e) => console.error('[DISCORD SHARD ERROR]', e));
 bot.on('warn', (w) => console.warn('[DISCORD WARN]', w));
