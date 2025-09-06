@@ -22,9 +22,9 @@ const execFileP = promisify(execFile);
 const {
   DISCORD_TOKEN,
   MAKE_WEBHOOK_URL,
-  IG_SESSIONID,
-  IG_USER,
-  IG_PASS,
+  IG_SESSIONID,   // opcional
+  IG_USER,        // opcional
+  IG_PASS,        // opcional
   INSTALOADER_BIN // opcional (ex.: /root/.local/bin/instaloader)
 } = process.env;
 
@@ -32,12 +32,15 @@ if (!DISCORD_TOKEN || !MAKE_WEBHOOK_URL) {
   console.error('Preencha DISCORD_TOKEN e MAKE_WEBHOOK_URL no .env');
   process.exit(1);
 }
+
+const INSTALOADER = INSTALOADER_BIN || 'instaloader';
+
 console.log('[BOOT]', {
   file: __filename,
   cwd: process.cwd(),
   node: process.versions.node,
   PATH: process.env.PATH,
-  instaloaderBin: INSTALOADER_BIN || 'instaloader'
+  instaloaderBin: INSTALOADER
 });
 
 // ---- Força IPv4 só no transfer.sh (evita IPv6 ruim) ----
@@ -53,11 +56,19 @@ async function existsNonEmpty(p) {
   } catch { return false; }
 }
 
+async function instaloaderSupportsSessionId() {
+  try {
+    const { stdout } = await execFileP(INSTALOADER, ['--help']);
+    return /--sessionid\b/.test(stdout || '');
+  } catch {
+    return false;
+  }
+}
+
 // ---- Download com Instaloader ----
 async function downloadWithInstaloader(instaUrl, tmpDir, id) {
   await fsp.mkdir(tmpDir, { recursive: true });
 
-  const bin = INSTALOADER_BIN || 'instaloader';
   const args = [
     '--no-captions',
     '--no-compress-json',
@@ -66,22 +77,36 @@ async function downloadWithInstaloader(instaUrl, tmpDir, id) {
     '--filename-pattern', id
   ];
 
-  if (IG_SESSIONID) {
-    args.push('--sessionid', IG_SESSIONID);
-  } else if (IG_USER && IG_PASS) {
+  // Preferência: LOGIN/SENHA (compatível com qualquer versão)
+  if (IG_USER && IG_PASS) {
     args.push('--login', IG_USER, '--password', IG_PASS);
+  } else if (IG_SESSIONID) {
+    // Só tentar --sessionid se a versão suportar
+    const hasSessionId = await instaloaderSupportsSessionId();
+    if (hasSessionId) {
+      args.push('--sessionid', IG_SESSIONID);
+    } else {
+      throw new Error(
+        'Sua versão do Instaloader não suporta --sessionid. ' +
+        'Use IG_USER/IG_PASS no .env OU instale uma versão recente com "pipx install instaloader" ' +
+        'e defina INSTALOADER_BIN=/root/.local/bin/instaloader.'
+      );
+    }
   }
-
   // alvo (URL) após "--"
   args.push('--', instaUrl);
 
-  console.log('[instaloader CMD]', bin, args.join(' '));
+  console.log('[instaloader CMD]', INSTALOADER, args.join(' '));
 
   try {
-    const { stdout, stderr } = await execFileP(bin, args, { maxBuffer: 1024 * 1024 * 1024 });
+    const { stdout, stderr } = await execFileP(INSTALOADER, args, { maxBuffer: 1024 * 1024 * 1024 });
     if (stdout) console.log('[instaloader stdout]', stdout.split('\n').slice(-20).join('\n'));
     if (stderr) console.log('[instaloader stderr]', stderr.split('\n').slice(-20).join('\n'));
   } catch (e) {
+    // Se falhou e você tem IG_USER/IG_PASS, vale exibir dica sobre 2FA/Challenge
+    if (IG_USER && IG_PASS) {
+      console.warn('[instaloader dica] Se houver 2FA/challenge, rode manualmente "instaloader -l SEUUSER" uma vez para salvar sessão.');
+    }
     throw new Error(`Falha no Instaloader: ${e.message}`);
   }
 
@@ -89,7 +114,7 @@ async function downloadWithInstaloader(instaUrl, tmpDir, id) {
   const expected = nodePath.join(tmpDir, `${id}.mp4`);
   if (await existsNonEmpty(expected)) return expected;
 
-  // 2) caso o padrão varie, pega o .mp4 mais novo do tmpDir
+  // 2) se padrão variar, pega o .mp4 mais novo do tmpDir
   const entries = await fsp.readdir(tmpDir);
   let newest = null;
   for (const name of entries) {
@@ -102,7 +127,7 @@ async function downloadWithInstaloader(instaUrl, tmpDir, id) {
   }
   if (newest?.full) return newest.full;
 
-  throw new Error('Instaloader não gerou .mp4 (pode exigir login/challenge).');
+  throw new Error('Instaloader não gerou .mp4 (pode exigir login/2FA/challenge).');
 }
 
 // ---- Uploads (transfer.sh -> 0x0.st -> file.io) ----
